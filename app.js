@@ -93,15 +93,25 @@ const TTS = {
   //  3) длинные тексты (>~15 с) Chrome обрывает → режем по знакам препинания и говорим по очереди;
   //  4) Chrome иногда «засыпает» на полуслове → страховка resume() каждые 5 с, пока говорит.
   _seq:0, cur:null, queue:[], audio:null,
-  // Основной путь — нейроголоса Microsoft через сервер курса (edge-tts, mp3 кэшируется на диске):
-  // одинаково звучит в любом браузере и на телефоне, не режется. Запасной — speechSynthesis браузера.
+  // Путь 1 — нейроголоса Microsoft через сервер курса (edge-tts, mp3 кэшируется на диске):
+  // одинаково звучит в любом браузере и на телефоне, не режется.
+  // Путь 2 (без сервера — GitHub Pages и т.п.) — облачный голос Google TTS: mp3 играется тегом
+  // audio, CORS для воспроизведения не нужен, сервис-воркер кэширует файлы → офлайн тоже звучит.
+  // Путь 3 — speechSynthesis браузера. Устанавливать голоса вручную нигде не требуется.
   useServer(){ return API.ok && API.tts && S.set.engine!=='browser'; },
+  useCloud(){ return !this.useServer() && S.set.engine!=='browser' && (this._cfail||0)<2; },
   url(text, rate){ return 'api/tts?text='+encodeURIComponent(text)+'&v='+encodeURIComponent(S.set.svoice||'xiaoxiao')+'&rate='+Math.round((rate-1)*100); },
+  cloudUrl(t){ return 'https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=zh-CN&q='+encodeURIComponent(t); },
   prefetch(texts){ if(!this.useServer()) return; [...new Set(texts.map(t=>showZh(t).replace(/[（(].*?[)）]/g,'').trim()).filter(Boolean))].slice(0,40).forEach((t,i)=>setTimeout(()=>fetch(this.url(t,S.set.rate)).catch(()=>{}), i*120)); },
   sayServer(t, rate){ return new Promise((res,rej)=>{ const my=++this._seq; const a=this.audio||(this.audio=new Audio()); a.pause(); a.onended=()=>{ if(my===this._seq) res(); }; a.onerror=()=>rej(new Error('audio'));
       a.src=this.url(t,rate); a.play().catch(rej); }); },
+  sayCloud(t, rate){ const my=++this._seq; const parts=t.length>180?t.split(/(?<=[。！？；!?;])/).map(x=>x.trim()).filter(Boolean):[t];
+    const one=k=>new Promise((res,rej)=>{ if(my!==this._seq||k>=parts.length) return res(); const a=this.audio||(this.audio=new Audio()); a.pause(); a.onended=()=>res(); a.onerror=()=>{ this._cfail=(this._cfail||0)+1; rej(new Error('audio')); };
+      try{ a.playbackRate=Math.max(.5,Math.min(2,rate)); }catch(e){} a.src=this.cloudUrl(parts[k]); a.play().catch(rej); });
+    return parts.reduce((p,_,i)=>p.then(()=>one(i)), Promise.resolve()); },
   say(text, opt={}){ const t=showZh(text).replace(/[（(].*?[)）]/g,'').trim(); if(!t) return Promise.resolve(); const rate=opt.rate ?? S.set.rate;
-    if(this.useServer()) return this.sayServer(t, rate).catch(()=>this.sayBrowser(t, rate));
+    if(this.useServer()) return this.sayServer(t, rate).catch(()=>this.sayCloud(t, rate)).catch(()=>this.sayBrowser(t, rate));
+    if(this.useCloud()) return this.sayCloud(t, rate).catch(()=>this.sayBrowser(t, rate));
     return this.sayBrowser(t, rate); },
   sayBrowser(text, rate){ return new Promise(res=>{ if(!('speechSynthesis' in window)){ res(); return; }
       let t=text; if(!/[。！？!?…]$/.test(t)) t+='。'; // Edge/Chrome глотают хвост фразы без знака препинания
@@ -116,7 +126,7 @@ const TTS = {
         speechSynthesis.speak(u); this._watch(); };
       const start=()=>{ if(my!==this._seq){ res(); return; } speakPart(0); };
       if(speechSynthesis.speaking || speechSynthesis.pending){ speechSynthesis.cancel(); setTimeout(start, 150); } else start();
-      if(!v && !this._warned){ this._warned=true; setTimeout(()=>{ if(!this.voices.length) toast('Не найден китайский голос. Установите его в системе (Windows: Параметры → Время и язык → Речь → Добавить голоса → 中文).', 6000); },800); } }); },
+      if(!v && !this._warned){ this._warned=true; setTimeout(()=>{ if(!this.voices.length) toast('Китайский голос не найден. Откройте Настройки → «Включить голоса / проверить».', 6000); },800); } }); },
   _watch(){ clearInterval(this._wt); const edge=/Edg\//.test(navigator.userAgent), mobile=/Android|iPhone|iPad/.test(navigator.userAgent);
     this._wt=setInterval(()=>{ if(!speechSynthesis.speaking){ clearInterval(this._wt); return; } if(!edge && !mobile){ speechSynthesis.pause(); speechSynthesis.resume(); } else if(speechSynthesis.paused) speechSynthesis.resume(); }, 5000); },
   stop(){ this._seq++; this.cur=null; clearInterval(this._wt); if(this.audio){ this.audio.pause(); } if('speechSynthesis' in window) speechSynthesis.cancel(); }
@@ -447,11 +457,13 @@ PAGES.settings = (app) => {
    <label class="lbl">Пиньинь в карточках повторения</label><select class="txt" id="spy"><option value="always" ${S.set.pinyin==='always'?'selected':''}>Показывать всегда</option><option value="never" ${S.set.pinyin==='never'?'selected':''}>Скрывать (учу читать)</option></select>
    <label class="lbl">Цель дня: ${S.set.goal} минут (≈ ${S.set.goal*4} XP)</label><input type="range" id="sgoal" min="5" max="60" step="5" value="${S.set.goal}" style="width:100%">
    <label class="lbl">Скорость речи: ${S.set.rate}</label><input type="range" id="srate" min="0.5" max="1.2" step="0.1" value="${S.set.rate}" style="width:100%">
+   ${!(API.ok&&API.tts)?`<label class="lbl">Голос курса (облачный)</label><div class="hint small">Без сервера курс говорит облачным голосом Google — работает сразу на любом устройстве, ничего устанавливать не нужно.</div>
+   <div class="actions"><button class="btn" data-act="fixvoice">${ico('i-sound')} Включить голоса / проверить</button></div>`:''}
    ${API.ok&&API.tts?`<label class="lbl">Голос (нейроголоса Microsoft через сервер курса)</label><select class="txt" id="ssvoice">${[['xiaoxiao','Сяосяо — женский, стандарт'],['yunxi','Юньси — мужской, живой'],['yunyang','Юньян — мужской, диктор'],['xiaoyi','Сяои — женский, мягкий'],['yunjian','Юньцзянь — мужской, спокойный'],['xiaobei','Сяобэй — северо-восточный акцент']].filter(v=>API.voices.includes(v[0])).map(v=>`<option value="${v[0]}" ${(S.set.svoice||'xiaoxiao')===v[0]?'selected':''}>${v[1]}</option>`).join('')}</select>
    <div class="toggle"><div><b>Голос браузера вместо серверного</b><div class="xs dim">Если сервер недоступен, браузерный включается сам</div></div><button class="sw ${S.set.engine==='browser'?'on':''}" data-set="engine"></button></div>`:''}
    <label class="lbl">Голос браузера (запасной)</label><select class="txt" id="svoice"><option value="">Автовыбор${TTS.pick()?' — '+esc(TTS.pick().name):''}</option>${vs.map(v=>`<option value="${esc(v.name)}" ${S.set.voice===v.name?'selected':''}>${esc(v.name)} (${v.lang})</option>`).join('')}</select>
    <div class="actions"><button class="btn" data-act="test">${ico('i-sound')} Проба голоса</button></div>
-   ${!vs.length&&!(API.ok&&API.tts)?`<div class="hint mt small">Китайских голосов в системе нет. <b>Windows 11:</b> Параметры → Время и язык → Речь → «Управление голосами» → Добавить → 中文（中国）. В Edge доступны онлайн-голоса Xiaoxiao/Yunxi — они лучше всех. <b>Android:</b> Настройки → Система → Языки → Преобразование текста в речь → установить китайский. <b>iPhone:</b> Настройки → Универсальный доступ → Речь → Голоса → Китайский.</div>`:''}
+   ${!vs.length&&!(API.ok&&API.tts)?`<div class="hint mt small">Если облачный голос так и не зазвучал — добавьте системный китайский голос. <b>Windows 11:</b> Параметры → Время и язык → Речь → «Управление голосами» → Добавить → 中文（中国）. В Edge доступны онлайн-голоса Xiaoxiao/Yunxi — они лучше всех. <b>Android:</b> Настройки → Система → Языки → Преобразование текста в речь → установить китайский. <b>iPhone:</b> Настройки → Универсальный доступ → Речь → Голоса → Китайский.</div>`:''}
   </div>
   <div class="card"><h3>Прогресс на других устройствах</h3><p class="small muted">${API.ok?'Сервер курса работает: профили с PIN хранятся в папке users и доступны с любого устройства в вашей сети по адресу этого компьютера.':'Курс открыт без сервера — прогресс живёт в этом браузере.'} В любом случае можно перенести прогресс файлом.</p>
    <div class="actions">${API.ok?`<a class="btn" href="#/login">${ico('i-user')} ${API.user?'Профиль: '+esc(API.user):'Войти в профиль'}</a>`:''}<button class="btn" data-act="export">${ico('i-book')} Экспорт в файл</button><label class="btn" style="cursor:pointer">${ico('i-sync')} Импорт из файла<input type="file" id="imp" accept="application/json" hidden></label></div>
@@ -464,6 +476,7 @@ PAGES.settings = (app) => {
   $('#svoice').onchange=e=>{ S.set.voice=e.target.value; save(); TTS.say('你好！我是小龙。'); }; const sv=$('#ssvoice'); if(sv) sv.onchange=e=>{ S.set.svoice=e.target.value; save(); TTS.say('你好！我是小龙，我们一起学汉语吧。'); };
   $('#imp').onchange=e=>{ const f=e.target.files[0]; if(!f) return; const r=new FileReader(); r.onload=()=>{ try{ const o=JSON.parse(r.result); if(o.v!==1||o.xp==null) throw 0; S=Object.assign(DEF(),o); S.set=Object.assign(DEF().set,o.set||{}); save(); toast('Прогресс импортирован'); route(); }catch(err){ toast('Файл не похож на прогресс курса'); } }; r.readAsText(f); };
   app.onclick=e=>{ const sw=e.target.closest('[data-set]'); const a=e.target.closest('[data-act]'); if(sw){ const k=sw.dataset.set; if(k==='theme'){ S.set.theme=S.set.theme==='light'?'dark':'light'; document.documentElement.dataset.theme=S.set.theme==='light'?'light':''; } else if(k==='engine'){ S.set.engine=S.set.engine==='browser'?'server':'browser'; } else S.set[k]=!S.set[k]; sw.classList.toggle('on'); save(); renderNav(); return; } if(!a) return;
+    if(a.dataset.act==='fixvoice'){ TTS._cfail=0; TTS.sayCloud('你好！我是小龙。我们一起学汉语吧。', S.set.rate||1).then(()=>toast('Голоса работают — устанавливать ничего не нужно')).catch(()=>modal(`<h3>Голос не зазвучал</h3><p class="muted">Проверьте громкость и интернет, затем добавьте системный голос:</p><p class="small"><b>Windows:</b> Параметры → Время и язык → Речь → Добавить голоса → 中文（中国）<br><b>macOS:</b> Системные настройки → Универсальный доступ → Речь → Системный голос → Управление голосами → 中文<br><b>Android:</b> Настройки → Система → Языки → Синтез речи<br><b>iPhone:</b> Настройки → Универсальный доступ → Речь → Голоса → Китайский</p><div class="actions"><button class="btn" data-act="close-modal">Понятно</button></div>`, ()=>{})); }
     if(a.dataset.act==='test') TTS.say('你好！我是小龙。我们一起学汉语吧！');
     if(a.dataset.act==='export'){ const b=new Blob([JSON.stringify(S)],{type:'application/json'}); const u=URL.createObjectURL(b); const l=document.createElement('a'); l.href=u; l.download='put-drakona-progress.json'; l.click(); setTimeout(()=>URL.revokeObjectURL(u),2000); }
     if(a.dataset.act==='reset'){ modal(`<h3>Точно сбросить?</h3><p class="muted">Это нельзя отменить. Сначала можно сделать экспорт.</p><div class="actions"><button class="btn red" data-act="do-reset">Да, сбросить</button><button class="btn" data-act="close-modal">Отмена</button></div>`, m=>{ m.onclick=ev=>{ if(ev.target.closest('[data-act=do-reset]')){ S=DEF(); save(); m.remove(); lastStage=0; route(); toast('Прогресс сброшен'); } }; }); } };

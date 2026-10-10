@@ -1,6 +1,6 @@
 /* Путь Дракона — офлайн-кэш. Стратегия: ядро курса кэшируется при установке,
    данные о чертах иероглифов и шрифты — по мере обращения. Версию менять при обновлении курса. */
-const V = 'dp-v1';
+const V = 'dp-v2';
 const CORE = ['./','./index.html','./app.js','./manifest.webmanifest','./icon.svg','./lib/hanzi-writer.min.js',
   './data/core.js','./data/words.js','./data/words2.js','./data/words3.js','./data/lessons-g1.js','./data/lessons-g2.js','./data/lessons-g3.js',
   './data/lessons-g4.js','./data/lessons-g5.js','./data/lessons-g6.js','./data/lessons-g7.js'];
